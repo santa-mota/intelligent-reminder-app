@@ -167,7 +167,7 @@ private fun ComposerBar(sending: Boolean, onSend: (String) -> Unit) {
                 onSend(text)
                 text = ""
             }),
-            maxLines = 4,
+            singleLine = true,
         )
         IconButton(
             enabled = !sending && text.isNotBlank(),

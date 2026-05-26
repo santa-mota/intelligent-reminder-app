@@ -25,7 +25,33 @@ import com.santamota.reminder.nlu.ResponsePrompt
 import com.santamota.reminder.nlu.RuleBasedParser
 import kotlinx.coroutines.flow.firstOrNull
 import java.time.Clock
+import java.time.Duration
 import java.time.ZonedDateTime
+
+/**
+ * What the engine needs from the user's next message before it can finish
+ * the current task. Single-slot — at most one outstanding clarification.
+ */
+sealed interface PendingClarification {
+    /**
+     * User asked for "X before lunch" but no lunch reminder exists. We
+     * keep the original intent around and apply it once the user tells us
+     * when lunch is.
+     */
+    data class NeedAnchorSchedule(
+        val originalIntent: Intent.Create,
+        val anchorTitle: String,
+    ) : PendingClarification
+
+    /**
+     * Multiple reminders matched the user's query. Show them numbered;
+     * resume the original action once they pick one.
+     */
+    data class DisambiguateMatch(
+        val originalIntent: Intent,
+        val candidates: List<Reminder>,
+    ) : PendingClarification
+}
 
 /**
  * Orchestrator: takes a user utterance, parses → plans → persists →
@@ -44,6 +70,8 @@ class ReminderEngine(
     private val learner: PreferenceLearner,
 ) {
 
+    @Volatile private var pending: PendingClarification? = null
+
     /**
      * Handle a user message. Persists both the user turn and the agent
      * response to the chat log; returns the agent reply (UI can stream it).
@@ -59,20 +87,101 @@ class ReminderEngine(
             userTimezone = clock.zone.id,
         )
 
+        // Multi-turn: if we asked something, try to apply the answer first.
+        pending?.let { p ->
+            val resolved = tryResolvePending(userText, p, ctx)
+            if (resolved != null) {
+                pending = null
+                logAgent(resolved.text, "Continuation")
+                return resolved
+            }
+            // The user changed topic; drop the pending question silently.
+            pending = null
+        }
+
         val intent = when (val rule = parser.parse(userText)) {
             is Intent.Ambiguous -> if (llm.isReady()) llm.resolveIntent(userText, ctx) else rule
             else -> rule
         }
 
         val reply = dispatch(intent, ctx)
+        logAgent(reply.text, intent.javaClass.simpleName)
+        return reply
+    }
 
+    private suspend fun logAgent(text: String, intentKind: String) {
         chatDao.insert(ChatMessageEntity(
             role = "AGENT",
-            text = reply.text,
+            text = text,
             createdEpochMs = clock.millis(),
-            intentKind = intent.javaClass.simpleName,
+            intentKind = intentKind,
         ))
-        return reply
+    }
+
+    private suspend fun tryResolvePending(
+        userText: String,
+        p: PendingClarification,
+        ctx: ChatContext,
+    ): EngineReply? = when (p) {
+        is PendingClarification.NeedAnchorSchedule -> resolveAnchor(userText, p, ctx)
+        is PendingClarification.DisambiguateMatch -> resolveDisambiguation(userText, p, ctx)
+    }
+
+    private suspend fun resolveAnchor(
+        userText: String,
+        p: PendingClarification.NeedAnchorSchedule,
+        ctx: ChatContext,
+    ): EngineReply? {
+        // User should reply with a time spec for the anchor (e.g. "at 1 PM"
+        // or "every day at 1 PM"). We parse it as a Create for the anchor.
+        val parsed = parser.parse("remind me about ${p.anchorTitle} $userText")
+        val anchorIntent = parsed as? Intent.Create ?: return null
+        val anchorReply = handleCreate(anchorIntent.copy(title = p.anchorTitle), ctx)
+        if (anchorReply.plan == null) return null
+        // Now retry the original relative intent against the new anchor.
+        val followUp = handleCreate(p.originalIntent, ctx)
+        val combined = "${anchorReply.text}\n\n${followUp.text}"
+        return EngineReply(text = combined, plan = followUp.plan, suggestion = followUp.suggestion)
+    }
+
+    private suspend fun resolveDisambiguation(
+        userText: String,
+        p: PendingClarification.DisambiguateMatch,
+        ctx: ChatContext,
+    ): EngineReply? {
+        val pick = pickFromText(userText, p.candidates) ?: return null
+        return executeAgainst(p.originalIntent, pick, ctx)
+    }
+
+    /** "1", "2", "the first one", "first", or an exact title match. */
+    private fun pickFromText(text: String, candidates: List<Reminder>): Reminder? {
+        val cleaned = text.trim().lowercase()
+        cleaned.toIntOrNull()?.let { n ->
+            if (n in 1..candidates.size) return candidates[n - 1]
+        }
+        val ordinals = mapOf(
+            "first" to 0, "1st" to 0, "one" to 0,
+            "second" to 1, "2nd" to 1, "two" to 1,
+            "third" to 2, "3rd" to 2, "three" to 2,
+        )
+        ordinals.entries.firstOrNull { cleaned.contains(it.key) }
+            ?.let { return candidates[it.value] }
+        return candidates.firstOrNull {
+            it.title.equals(cleaned, ignoreCase = true) ||
+                cleaned.contains(it.title.lowercase())
+        }
+    }
+
+    private suspend fun executeAgainst(
+        intent: Intent,
+        target: Reminder,
+        ctx: ChatContext,
+    ): EngineReply = when (intent) {
+        is Intent.Move -> handleMoveOn(target, intent.newTimeSpec, ctx)
+        is Intent.Cancel -> handleCancelOn(target, intent.scope, ctx)
+        is Intent.MarkDone -> handleDoneOn(target, ctx)
+        is Intent.Delay -> handleDelayOn(target, intent.by, ctx)
+        else -> EngineReply(text = "Sorry, I lost track of what I was doing.")
     }
 
     // --- intent dispatch -----------------------------------------------
@@ -97,12 +206,25 @@ class ReminderEngine(
     private suspend fun handleCreate(intent: Intent.Create, ctx: ChatContext): EngineReply {
         val now = ZonedDateTime.now(clock)
         // Resolve relativeTo: find parent reminder, if any.
-        val parent = intent.relativeTo?.let { rel ->
-            findOne(rel.match)
-                ?: return EngineReply(
-                    text = "I couldn't find a \"${rel.match.titleQuery}\" reminder to anchor against. When is it?",
-                    needsClarification = true,
+        val parent: Reminder? = intent.relativeTo?.let { rel ->
+            when (val f = findReminder(rel.match)) {
+                is FindResult.One -> f.r
+                is FindResult.Many -> {
+                    pending = PendingClarification.DisambiguateMatch(intent, f.rs)
+                    return ambiguityReply(rel.match.titleQuery, f.rs)
+                }
+                FindResult.None -> {
+                    val anchorTitle = rel.match.titleQuery ?: "the event"
+                    pending = PendingClarification.NeedAnchorSchedule(intent, anchorTitle)
+                    return EngineReply(
+                        text = "I don't have a \"$anchorTitle\" reminder yet. When is it? (e.g. \"every day at 1 PM\")",
+                        needsClarification = true,
+                    )
+                }
+                FindResult.QueryTooShort -> return EngineReply(
+                    text = "Can you tell me which reminder to anchor against? \"${rel.match.titleQuery}\" is too short to find a unique match.",
                 )
+            }
         }
 
         val triggerAt = when {
@@ -137,7 +259,7 @@ class ReminderEngine(
         learner.observeCreate(main)
 
         val suggestion = learner.suggestFor(main)
-        val summary = describePlan(plan)
+        val summary = describePlan(plan, parent = parent)
         val reply = llm.composeResponse(ResponsePrompt.Confirmation(summary), ctx)
         return EngineReply(text = reply, suggestion = suggestion, plan = plan)
     }
@@ -164,24 +286,34 @@ class ReminderEngine(
         }
     }
 
-    private suspend fun handleMove(intent: Intent.Move, ctx: ChatContext): EngineReply {
-        val target = findOne(intent.targetMatch) ?: return notFound(intent.targetMatch.titleQuery)
-        val newTime = intent.newTimeSpec.resolveTo(ZonedDateTime.now(clock))
+    private suspend fun handleMove(intent: Intent.Move, ctx: ChatContext): EngineReply =
+        gateAndDispatch(intent, intent.targetMatch) { handleMoveOn(it, intent.newTimeSpec, ctx) }
+
+    private suspend fun handleMoveOn(
+        target: Reminder, spec: TimeSpec, ctx: ChatContext,
+    ): EngineReply {
+        val newTime = spec.resolveTo(ZonedDateTime.now(clock))
         val active = activeReminders()
         val updated = DependencyGraph(active).cascadeMove(target, newTime)
         persist(updated)
         scheduler.rescheduleAll(updated)
+        val movedTitle = target.title
+        val newTimeStr = humanWhen(target.copy(triggerAt = newTime))
         val summary = if (updated.size == 1) {
-            "Moved ${target.title} to ${humanTime(newTime)}."
+            "Moved $movedTitle — now $newTimeStr."
         } else {
-            "Moved ${target.title} to ${humanTime(newTime)} — ${updated.size - 1} dependent reminder(s) shifted with it."
+            "Moved $movedTitle — now $newTimeStr. ${updated.size - 1} dependent reminder(s) shifted with it."
         }
         return EngineReply(text = llm.composeResponse(ResponsePrompt.Done(summary), ctx))
     }
 
-    private suspend fun handleCancel(intent: Intent.Cancel, ctx: ChatContext): EngineReply {
-        val target = findOne(intent.targetMatch) ?: return notFound(intent.targetMatch.titleQuery)
-        return when (intent.scope) {
+    private suspend fun handleCancel(intent: Intent.Cancel, ctx: ChatContext): EngineReply =
+        gateAndDispatch(intent, intent.targetMatch) { handleCancelOn(it, intent.scope, ctx) }
+
+    private suspend fun handleCancelOn(
+        target: Reminder, scope: CancelScope, ctx: ChatContext,
+    ): EngineReply {
+        return when (scope) {
             CancelScope.THIS_OCCURRENCE -> {
                 if (target.recurrence != null) {
                     val updated = target.copy(
@@ -206,8 +338,10 @@ class ReminderEngine(
         }
     }
 
-    private suspend fun handleDone(intent: Intent.MarkDone, ctx: ChatContext): EngineReply {
-        val target = findOne(intent.targetMatch) ?: return notFound(intent.targetMatch.titleQuery)
+    private suspend fun handleDone(intent: Intent.MarkDone, ctx: ChatContext): EngineReply =
+        gateAndDispatch(intent, intent.targetMatch) { handleDoneOn(it, ctx) }
+
+    private suspend fun handleDoneOn(target: Reminder, ctx: ChatContext): EngineReply {
         return if (target.recurrence != null) {
             // Recurring: skip this occurrence; tell user the next one.
             val updated = target.copy(
@@ -238,25 +372,83 @@ class ReminderEngine(
         }
     }
 
-    private suspend fun handleDelay(intent: Intent.Delay, ctx: ChatContext): EngineReply {
-        val target = findOne(intent.targetMatch) ?: return notFound(intent.targetMatch.titleQuery)
-        val newTime = target.triggerAt.plus(intent.by)
+    private suspend fun handleDelay(intent: Intent.Delay, ctx: ChatContext): EngineReply =
+        gateAndDispatch(intent, intent.targetMatch) { handleDelayOn(it, intent.by, ctx) }
+
+    private suspend fun handleDelayOn(
+        target: Reminder, by: Duration, ctx: ChatContext,
+    ): EngineReply {
+        val newTime = target.triggerAt.plus(by)
         val active = activeReminders()
         val updated = DependencyGraph(active).cascadeMove(target, newTime)
         persist(updated)
         scheduler.rescheduleAll(updated)
+        val newTimeStr = humanWhen(target.copy(triggerAt = newTime))
         return EngineReply(
-            text = "Delayed ${target.title} by ${humanDuration(intent.by)} — now at ${humanTime(newTime)}.",
+            text = "Delayed ${target.title} by ${humanDuration(by)} — now $newTimeStr.",
         )
     }
 
     // --- helpers --------------------------------------------------------
 
-    private suspend fun findOne(match: ReminderMatch): Reminder? {
+    /**
+     * Match the user's query against active reminders.
+     *
+     * Guardrails:
+     *  - Refuses queries shorter than 3 chars (would match too aggressively).
+     *  - If the search returns multiple rows but exactly one is an exact
+     *    title match (case-insensitive), picks that one. Else returns Many.
+     *  - Returns None when nothing matches.
+     */
+    private suspend fun findReminder(match: ReminderMatch): FindResult {
         val q = match.titleQuery?.trim().orEmpty()
-        if (q.isBlank()) return null
-        val rows = reminderDao.search(q)
-        return rows.firstOrNull()?.toDomain()
+        if (q.isBlank()) return FindResult.None
+        if (q.length < MIN_QUERY_LEN) return FindResult.QueryTooShort
+        val rows = reminderDao.search(q).map { it.toDomain() }
+        return when (rows.size) {
+            0 -> FindResult.None
+            1 -> FindResult.One(rows.first())
+            else -> {
+                val exact = rows.filter { it.title.equals(q, ignoreCase = true) }
+                when (exact.size) {
+                    1 -> FindResult.One(exact.first())
+                    else -> FindResult.Many(rows)
+                }
+            }
+        }
+    }
+
+    /**
+     * Glue used by handleMove / handleCancel / handleDone / handleDelay.
+     * Resolves the target with [findReminder]; on Many, sets pending
+     * disambiguation and emits a numbered choice prompt; on None or
+     * QueryTooShort, emits a friendly explanation. Otherwise hands the
+     * matched reminder to [action].
+     */
+    private suspend fun gateAndDispatch(
+        intent: Intent,
+        match: ReminderMatch,
+        action: suspend (Reminder) -> EngineReply,
+    ): EngineReply = when (val r = findReminder(match)) {
+        is FindResult.One -> action(r.r)
+        is FindResult.Many -> {
+            pending = PendingClarification.DisambiguateMatch(intent, r.rs)
+            ambiguityReply(match.titleQuery, r.rs)
+        }
+        FindResult.None -> notFound(match.titleQuery)
+        FindResult.QueryTooShort -> EngineReply(
+            text = "\"${match.titleQuery}\" is too short — could you tell me the full reminder title?",
+        )
+    }
+
+    private fun ambiguityReply(query: String?, candidates: List<Reminder>): EngineReply {
+        val numbered = candidates.mapIndexed { i, r ->
+            "${i + 1}. ${r.title} (${humanWhen(r)})"
+        }.joinToString("\n")
+        return EngineReply(
+            text = "I found ${candidates.size} reminders matching \"${query ?: ""}\":\n$numbered\n\nWhich one? (reply with the number)",
+            needsClarification = true,
+        )
     }
 
     private suspend fun activeReminders(): List<Reminder> =
@@ -293,17 +485,82 @@ class ReminderEngine(
         is TimeSpec.RelativeToNow -> now.plus(offset)
     }
 
-    private fun describePlan(plan: ReminderPlan): String {
+    private fun describePlan(plan: ReminderPlan, parent: Reminder? = null): String {
         val main = plan.main
-        val base = "Scheduled ${main.title} at ${humanTime(main.triggerAt)}"
-        val rec = main.recurrence?.let { " (${it.pattern.name.lowercase()})" } ?: ""
+        val when_ = humanWhen(main)
+        val relative = if (parent != null && main.relativeOffset != null) {
+            val abs = main.relativeOffset!!.abs()
+            val direction = if (main.relativeOffset!!.isNegative) "before" else "after"
+            " (${humanDuration(abs)} $direction ${parent.title})"
+        } else ""
         val leads = if (plan.leadUps.isEmpty()) "" else
-            ", with ${plan.leadUps.size} lead-up reminder(s)"
-        return "$base$rec$leads."
+            ", plus ${plan.leadUps.size} lead-up reminder(s)"
+        return "${main.title.replaceFirstChar { it.uppercase() }} — $when_$relative$leads."
+    }
+
+    /**
+     * Speaks the schedule like a person would:
+     *   one-time on a future day → "tomorrow at 3:00 PM" or "Tue May 26 at 3:00 PM"
+     *   one-time later today      → "today at 3:00 PM"
+     *   daily                     → "every day at 1:00 PM"
+     *   weekly                    → "every Monday at 9:00 AM"
+     *   monthly                   → "on the 15th at 9:00 AM"
+     */
+    private fun humanWhen(r: Reminder): String {
+        val time = r.triggerAt.toLocalTime()
+        val timeStr = humanClock(time)
+        val rec = r.recurrence
+        return when {
+            rec == null -> {
+                val date = r.triggerAt.toLocalDate()
+                val today = java.time.LocalDate.now(clock)
+                when {
+                    date == today -> "today at $timeStr"
+                    date == today.plusDays(1) -> "tomorrow at $timeStr"
+                    else -> "${date.format(SHORT_DATE_FMT)} at $timeStr"
+                }
+            }
+            rec.pattern == Recurrence.Pattern.DAILY ->
+                if (rec.interval == 1) "every day at $timeStr"
+                else "every ${rec.interval} days at $timeStr"
+            rec.pattern == Recurrence.Pattern.WEEKLY -> {
+                val days = rec.daysOfWeek.takeIf { it.isNotEmpty() }
+                    ?: setOf(r.triggerAt.dayOfWeek)
+                val dayStr = days
+                    .sortedBy { it.value }
+                    .joinToString(", ") {
+                        it.name.lowercase().replaceFirstChar { c -> c.uppercase() }
+                    }
+                "every $dayStr at $timeStr"
+            }
+            rec.pattern == Recurrence.Pattern.MONTHLY ->
+                "on the ${ordinal(r.triggerAt.dayOfMonth)} of every month at $timeStr"
+            rec.pattern == Recurrence.Pattern.YEARLY ->
+                "every year on ${r.triggerAt.format(SHORT_DATE_FMT)} at $timeStr"
+            else -> "at $timeStr"
+        }
+    }
+
+    private fun humanClock(t: java.time.LocalTime): String =
+        t.format(java.time.format.DateTimeFormatter.ofPattern("h:mm a", java.util.Locale.getDefault()))
+
+    private fun ordinal(n: Int): String {
+        val suffix = when {
+            n % 100 in 11..13 -> "th"
+            n % 10 == 1 -> "st"
+            n % 10 == 2 -> "nd"
+            n % 10 == 3 -> "rd"
+            else -> "th"
+        }
+        return "$n$suffix"
     }
 
     private fun humanTime(t: ZonedDateTime): String =
-        t.toLocalDateTime().toString().replace('T', ' ')
+        "${humanClock(t.toLocalTime())} on ${t.toLocalDate().format(SHORT_DATE_FMT)}"
+
+    private val SHORT_DATE_FMT = java.time.format.DateTimeFormatter.ofPattern(
+        "EEE MMM d", java.util.Locale.getDefault(),
+    )
 
     private fun humanDuration(d: java.time.Duration): String {
         val h = d.toHours()
@@ -313,6 +570,23 @@ class ReminderEngine(
             if (m > 0 || h == 0L) append("${m}m")
         }.trim()
     }
+
+    private companion object {
+        // Anything shorter feels too risky to fuzzy-match — "do" matching
+        // "doctor" would let users accidentally cancel unrelated reminders.
+        const val MIN_QUERY_LEN = 3
+    }
+}
+
+/**
+ * Three-way result from [ReminderEngine.findReminder]. Lets callers
+ * disambiguate / explain instead of silently picking the first match.
+ */
+sealed interface FindResult {
+    data class One(val r: Reminder) : FindResult
+    data class Many(val rs: List<Reminder>) : FindResult
+    data object None : FindResult
+    data object QueryTooShort : FindResult
 }
 
 data class EngineReply(
