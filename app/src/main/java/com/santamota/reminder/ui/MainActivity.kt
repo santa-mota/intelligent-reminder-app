@@ -50,6 +50,7 @@ private enum class Tab(val title: Int, val icon: androidx.compose.ui.graphics.ve
 @Composable
 fun AppRoot() {
     var tab by remember { mutableStateOf(Tab.Chat) }
+    RequestRequiredPermissions()
     Scaffold(
         bottomBar = {
             NavigationBar {

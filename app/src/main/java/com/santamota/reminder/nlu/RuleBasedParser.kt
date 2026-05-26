@@ -126,62 +126,78 @@ class RuleBasedParser(
     // --- CREATE ---------------------------------------------------------
 
     private fun parseCreate(text: String, rawInput: String): Intent.Create? {
-        // Detect explicit "alarm" vs "remind me"
         val isAlarm = text.startsWith("alarm") ||
             text.startsWith("wake me") ||
             Regex("""\bset\s+(?:an?\s+)?alarm\b""").containsMatchIn(text)
 
-        // Strip leading verb to get the core ("X at 5pm" or "X in 30 min")
         val stripped = text
-            .replace(Regex("""^(?:remind\s+me(?:\s+to|\s+about)?|alarm\s+for|alarm\s+at|set\s+(?:an?\s+)?alarm\s+(?:for|at)|wake\s+me\s+up?\s*(?:at)?|notify\s+me(?:\s+to)?|tell\s+me\s+to)\s+"""), "")
+            .replace(Regex("""^(?:remind\s+me(?:\s+to|\s+about)?|alarm\s+for|alarm\s+at|set\s+(?:an?\s+)?alarm\s+(?:for|at)|wake\s+me(?:\s+up)?\s*(?:at)?|notify\s+me(?:\s+to)?|tell\s+me\s+to)\s+"""), "")
             .trim()
 
         if (stripped == text && !text.startsWith("at ") && !text.startsWith("in ") &&
             !text.startsWith("every ") && !text.startsWith("daily ")
-        ) {
-            // No clear create-keyword; bail.
-            return null
+        ) return null
+
+        val (recurrence, withoutRec) = stripRecurrence(stripped)
+
+        // Relative anchor takes precedence — extraction also yields a title.
+        parseRelativeAnchorAndTitle(withoutRec)?.let { (anchor, title) ->
+            val finalTitle = title.ifBlank { "reminder" }
+            return Intent.Create(
+                title = finalTitle,
+                type = if (isAlarm) ReminderType.ALARM else ReminderType.NOTIFICATION,
+                timeSpec = TimeSpec.RelativeToNow(Duration.ZERO),
+                recurrence = recurrence,
+                relativeTo = anchor,
+                category = inferCategory(finalTitle),
+            )
         }
 
-        // Look for "X hour before Y" / "X min before Y"
-        val relative = parseRelativeAnchor(stripped)
-
-        // Extract recurrence ("every day", "daily", "every Monday")
-        val (recurrence, withoutRecurrence) = stripRecurrence(stripped)
-
-        // Extract time spec
-        val (timeSpec, title) = extractTimeAndTitle(withoutRecurrence)
-            ?: run {
-                // If we found a relative anchor, the "time" is the offset; OK.
-                if (relative != null) {
-                    val coreTitle = withoutRecurrence
-                        .replace(Regex("""\s*($DUR_RE)\s+before\s+(?:my\s+|the\s+)?.+$"""), "")
-                        .trim()
-                        .ifBlank { "reminder" }
-                    return Intent.Create(
-                        title = coreTitle,
-                        type = if (isAlarm) ReminderType.ALARM else ReminderType.NOTIFICATION,
-                        timeSpec = TimeSpec.RelativeToNow(Duration.ZERO),
-                        recurrence = recurrence,
-                        relativeTo = relative,
-                        category = inferCategory(coreTitle),
-                    )
-                }
-                return null
-            }
-
-        val cleanTitle = title.takeIf { it.isNotBlank() } ?: "reminder"
+        val (timeSpec, title) = extractTimeAndTitle(withoutRec) ?: return null
+        val finalTitle = title.takeIf { it.isNotBlank() } ?: "reminder"
         return Intent.Create(
-            title = cleanTitle,
+            title = finalTitle,
             type = if (isAlarm) ReminderType.ALARM else ReminderType.NOTIFICATION,
             timeSpec = timeSpec,
             recurrence = recurrence,
-            relativeTo = relative,
-            category = inferCategory(cleanTitle),
+            relativeTo = null,
+            category = inferCategory(finalTitle),
         )
     }
 
     // --- TIME PARSING ---------------------------------------------------
+
+    /**
+     * Parses a time fragment in isolation (used by [parseMove], where the
+     * title and time have already been split). Tries, in order:
+     * "in N units", "tomorrow at 9", bare clock time.
+     */
+    private fun parseTimeSpec(input: String): TimeSpec? {
+        val text = input.trim().lowercase()
+
+        Regex("""^in\s+($DUR_RE)$""").matchEntire(text)?.let { m ->
+            return parseDuration(m.groupValues[1])?.let { TimeSpec.RelativeToNow(it) }
+        }
+        Regex("""^($DATE_RE)\s+at\s+($TIME_RE)$""").matchEntire(text)?.let { m ->
+            val date = parseDate(m.groupValues[1]) ?: return@let
+            val time = parseTime(m.groupValues[2]) ?: return@let
+            return TimeSpec.DateAndTime(date, time)
+        }
+        Regex("""^($DATE_RE)$""").matchEntire(text)?.let { m ->
+            val date = parseDate(m.groupValues[1]) ?: return@let
+            return TimeSpec.DateAndTime(date, java.time.LocalTime.of(9, 0))
+        }
+        // Bare time → today, or tomorrow if past.
+        parseTime(text)?.let { time ->
+            val today = LocalDate.now(clock)
+            val candidate = ZonedDateTime.of(today, time, zone)
+            val date = if (candidate.isBefore(ZonedDateTime.now(clock))) {
+                today.plusDays(1)
+            } else today
+            return TimeSpec.DateAndTime(date, time)
+        }
+        return null
+    }
 
     /**
      * Extract a [TimeSpec] from a phrase. Returns null if nothing time-like
@@ -216,6 +232,18 @@ class RuleBasedParser(
             } else today
             val title = (m.groupValues[1] + " " + m.groupValues[3]).cleanTitle()
             return TimeSpec.DateAndTime(date, time) to title
+        }
+
+        // Last resort: the whole stripped text *is* a bare time spec like
+        // "7am" or "6:30am" (used by "set alarm for 7am" after the verb is
+        // stripped). Title becomes empty; engine falls back to "reminder".
+        parseTime(text.trim())?.let { time ->
+            val today = LocalDate.now(clock)
+            val candidate = ZonedDateTime.of(today, time, zone)
+            val date = if (candidate.isBefore(ZonedDateTime.now(clock))) {
+                today.plusDays(1)
+            } else today
+            return TimeSpec.DateAndTime(date, time) to ""
         }
 
         return null
@@ -334,19 +362,39 @@ class RuleBasedParser(
 
     // --- relative anchor ("an hour before lunch") -----------------------
 
-    private fun parseRelativeAnchor(text: String): RelativeAnchor? {
-        val rx = Regex("""(?:($DUR_RE)\s+)?(before|after)\s+(?:my\s+|the\s+)?(.+?)(?:\s+(?:reminder|alarm))?$""")
-        val m = rx.find(text) ?: return null
-        val durStr = m.groupValues[1].ifBlank { "1 hour" }
-        val direction = m.groupValues[2]
-        val anchorTitle = m.groupValues[3].trim()
-        if (anchorTitle.isBlank()) return null
+    /**
+     * Extract a relative anchor *and* the corresponding action title from a
+     * stripped utterance. Handles three common shapes:
+     *   "an hour before lunch to take medicine"  → anchor=lunch, title=take medicine
+     *   "take medicine an hour before lunch"     → anchor=lunch, title=take medicine
+     *   "an hour before lunch"                   → anchor=lunch, title=lunch
+     *
+     * Anchor is 1-3 words by default; if "to <action>" follows we treat the
+     * first word after before/after as the anchor (anchor is usually short
+     * — "lunch", "meeting", "the call").
+     */
+    private fun parseRelativeAnchorAndTitle(text: String): Pair<RelativeAnchor, String>? {
+        val rx = Regex(
+            """^(.*?)\s*(?:($DUR_RE)\s+)?(before|after)\s+(?:my\s+|the\s+)?(\w+(?:\s+\w+){0,2}?)(?:\s+(?:reminder|alarm))?(?:\s+to\s+(.+))?$"""
+        )
+        val m = rx.matchEntire(text) ?: return null
+        val prefix = m.groupValues[1].trim()
+        val durStr = m.groupValues[2].ifBlank { "1 hour" }
+        val direction = m.groupValues[3]
+        val anchorName = m.groupValues[4].trim()
+        val suffix = m.groupValues.getOrNull(5)?.trim().orEmpty()
+        if (anchorName.isBlank()) return null
         val duration = parseDuration(durStr) ?: return null
         val signed = if (direction == "before") duration.negated() else duration
+        val title = when {
+            suffix.isNotBlank() -> suffix.cleanTitle()
+            prefix.isNotBlank() -> prefix.cleanTitle()
+            else -> anchorName // fallback: title same as anchor ("remind me before lunch")
+        }
         return RelativeAnchor(
-            match = ReminderMatch(titleQuery = anchorTitle),
+            match = ReminderMatch(titleQuery = anchorName),
             offset = signed,
-        )
+        ) to title
     }
 
     // --- category inference --------------------------------------------

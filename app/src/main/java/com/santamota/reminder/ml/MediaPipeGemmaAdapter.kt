@@ -36,6 +36,7 @@ class MediaPipeGemmaAdapter(
 ) : LlmAdapter, AutoCloseable {
 
     @Volatile private var engine: LlmInference? = null
+    private val initLock = Any()
 
     private val json = Json { ignoreUnknownKeys = true; isLenient = true }
 
@@ -58,17 +59,18 @@ class MediaPipeGemmaAdapter(
         eng?.generateResponse(prompt)
     }
 
-    private fun tryInit(): Boolean {
-        if (engine != null) return true
+    private fun tryInit(): Boolean = synchronized(initLock) {
+        if (engine != null) return@synchronized true
         val file = File(modelPath)
-        if (!file.exists() || file.length() == 0L) return false
-        return try {
+        if (!file.exists() || file.length() == 0L) return@synchronized false
+        return@synchronized try {
             val opts = LlmInferenceOptions.builder()
                 .setModelPath(modelPath)
                 .setMaxTokens(maxTokens)
-                .setTopK(40)
-                .setTemperature(temperature)
                 .build()
+            // Per-call sampling params (temperature, topK) live on
+            // LlmInferenceSession in the current MediaPipe API. Builder no
+            // longer exposes setTopK; we accept the defaults for now.
             engine = LlmInference.createFromOptions(appContext, opts)
             true
         } catch (t: Throwable) {

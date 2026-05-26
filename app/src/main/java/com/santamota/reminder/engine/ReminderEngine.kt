@@ -9,6 +9,7 @@ import com.santamota.reminder.data.db.toEntity
 import com.santamota.reminder.domain.CancelScope
 import com.santamota.reminder.domain.DependencyGraph
 import com.santamota.reminder.domain.Intent
+import com.santamota.reminder.domain.nextOccurrenceFrom
 import com.santamota.reminder.domain.Recurrence
 import com.santamota.reminder.domain.Reminder
 import com.santamota.reminder.domain.ReminderCategory
@@ -22,6 +23,7 @@ import com.santamota.reminder.nlu.ChatTurn
 import com.santamota.reminder.nlu.LlmAdapter
 import com.santamota.reminder.nlu.ResponsePrompt
 import com.santamota.reminder.nlu.RuleBasedParser
+import kotlinx.coroutines.flow.firstOrNull
 import java.time.Clock
 import java.time.ZonedDateTime
 
@@ -185,8 +187,8 @@ class ReminderEngine(
                     val updated = target.copy(
                         exceptions = target.exceptions + target.triggerAt.toLocalDate(),
                     )
-                    val nextOcc = com.santamota.reminder.domain.nextOccurrenceFrom(
-                        updated, ZonedDateTime.now(clock).plusSeconds(1),
+                    val nextOcc = updated.nextOccurrenceFrom(
+                        ZonedDateTime.now(clock).plusSeconds(1)
                     )
                     val withNewTrigger = nextOcc?.let { updated.copy(triggerAt = it) } ?: updated
                     persist(listOf(withNewTrigger))
@@ -211,8 +213,8 @@ class ReminderEngine(
             val updated = target.copy(
                 exceptions = target.exceptions + target.triggerAt.toLocalDate(),
             )
-            val nextOcc = com.santamota.reminder.domain.nextOccurrenceFrom(
-                updated, ZonedDateTime.now(clock).plusSeconds(1),
+            val nextOcc = updated.nextOccurrenceFrom(
+                ZonedDateTime.now(clock).plusSeconds(1)
             )
             val withNewTrigger = nextOcc?.let { updated.copy(triggerAt = it) } ?: updated
             persist(listOf(withNewTrigger))
@@ -273,9 +275,13 @@ class ReminderEngine(
     }
 
     private suspend fun recentTurns(limit: Int = 6): List<ChatTurn> {
-        // Reads the latest N messages from the DB in chronological order.
-        // Bounded so we don't blow the LLM's context window.
-        return emptyList() // ChatViewModel passes recent history when it asks.
+        // Latest [limit] messages, chronological order. Bounded so we don't
+        // blow the LLM's context window.
+        val rows = chatDao.observeLatest(limit).firstOrNull() ?: return emptyList()
+        return rows.reversed().mapNotNull {
+            val role = runCatching { ChatTurn.Role.valueOf(it.role) }.getOrNull() ?: return@mapNotNull null
+            ChatTurn(role = role, text = it.text)
+        }
     }
 
     private fun notFound(q: String?): EngineReply =

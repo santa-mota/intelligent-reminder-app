@@ -6,6 +6,8 @@ import android.app.PendingIntent
 import android.content.BroadcastReceiver
 import android.content.Context
 import android.content.Intent
+import android.media.AudioAttributes
+import android.media.RingtoneManager
 import android.os.Build
 import androidx.core.app.NotificationCompat
 import androidx.core.content.getSystemService
@@ -13,6 +15,7 @@ import com.santamota.reminder.R
 import com.santamota.reminder.data.db.AppDatabase
 import com.santamota.reminder.data.db.toDomain
 import com.santamota.reminder.data.db.toEntity
+import com.santamota.reminder.domain.ReminderType
 import com.santamota.reminder.domain.nextOccurrenceFrom
 import dagger.hilt.android.EntryPointAccessors
 import kotlinx.coroutines.CoroutineScope
@@ -34,7 +37,8 @@ class AlarmFiredReceiver : BroadcastReceiver() {
             try {
                 val entry = ReminderAlarmEntryPoint.resolve(context)
                 val row = entry.db.reminderDao().byId(id) ?: return@launch
-                postNotification(context, id, row.title, row.description)
+                val isAlarmType = row.type == ReminderType.ALARM.name
+                postNotification(context, id, row.title, row.description, isAlarmType)
 
                 // Reschedule next occurrence for recurring reminders.
                 if (row.recurrencePattern != null) {
@@ -54,14 +58,37 @@ class AlarmFiredReceiver : BroadcastReceiver() {
         }
     }
 
-    private fun postNotification(context: Context, id: String, title: String, body: String?) {
+    private fun postNotification(
+        context: Context,
+        id: String,
+        title: String,
+        body: String?,
+        isAlarm: Boolean,
+    ) {
         val nm = context.getSystemService<NotificationManager>() ?: return
         if (Build.VERSION.SDK_INT >= 26) {
+            // Two channels — alarm gets the system alarm sound + DND bypass.
             nm.createNotificationChannel(
                 NotificationChannel(
                     CHANNEL_NOTIFY, context.getString(R.string.notification_channel_name),
                     NotificationManager.IMPORTANCE_HIGH,
                 ).apply { description = context.getString(R.string.notification_channel_desc) }
+            )
+            nm.createNotificationChannel(
+                NotificationChannel(
+                    CHANNEL_ALARM, context.getString(R.string.alarm_channel_name),
+                    NotificationManager.IMPORTANCE_HIGH,
+                ).apply {
+                    description = context.getString(R.string.alarm_channel_desc)
+                    setBypassDnd(true)
+                    setSound(
+                        RingtoneManager.getDefaultUri(RingtoneManager.TYPE_ALARM),
+                        AudioAttributes.Builder()
+                            .setUsage(AudioAttributes.USAGE_ALARM)
+                            .setContentType(AudioAttributes.CONTENT_TYPE_SONIFICATION)
+                            .build(),
+                    )
+                }
             )
         }
         val openIntent = context.packageManager
@@ -71,18 +98,22 @@ class AlarmFiredReceiver : BroadcastReceiver() {
             context, id.hashCode(), openIntent,
             PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE,
         )
-        val notif = NotificationCompat.Builder(context, CHANNEL_NOTIFY)
+        val channel = if (isAlarm) CHANNEL_ALARM else CHANNEL_NOTIFY
+        val notif = NotificationCompat.Builder(context, channel)
             .setSmallIcon(android.R.drawable.ic_dialog_info)
             .setContentTitle(title)
             .setContentText(body ?: "")
             .setAutoCancel(true)
             .setContentIntent(openPI)
+            .setCategory(if (isAlarm) NotificationCompat.CATEGORY_ALARM else NotificationCompat.CATEGORY_REMINDER)
+            .setPriority(NotificationCompat.PRIORITY_MAX)
             .build()
         nm.notify(id.hashCode(), notif)
     }
 
     private companion object {
         const val CHANNEL_NOTIFY = "reminder_notifications"
+        const val CHANNEL_ALARM = "reminder_alarms"
     }
 }
 
