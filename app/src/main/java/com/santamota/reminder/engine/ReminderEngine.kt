@@ -24,6 +24,7 @@ import com.santamota.reminder.nlu.LlmAdapter
 import com.santamota.reminder.nlu.ResponsePrompt
 import com.santamota.reminder.nlu.RuleBasedParser
 import kotlinx.coroutines.flow.firstOrNull
+import kotlinx.coroutines.withTimeoutOrNull
 import java.time.Clock
 import java.time.Duration
 import java.time.ZonedDateTime
@@ -100,20 +101,30 @@ class ReminderEngine(
         }
 
         // LLM-first: when the model is loaded, the LLM is the primary parser.
-        // The rule parser only runs as a degraded fallback when the model
-        // isn't available (file missing, load failed, etc.). This trades
-        // ~500ms of inference latency for handling phrasings no regex
-        // can — and lets the model extract rich context into description.
+        // The rule parser is the degraded fallback for:
+        //   1. The model file isn't present / failed to load
+        //   2. Inference exceeded LLM_TIMEOUT_MS (slow hardware, stuck model)
+        //   3. The LLM returned Ambiguous with no rule-side recourse
+        //
+        // The timeout matters more than it looks. On a Pixel 8 Pro, Qwen 2.5
+        // 0.5B int8 produces a structured response in ~2s. On the qemu
+        // emulator with no host GPU, the same call can take 5+ minutes —
+        // unbounded "thinking..." is worse UX than a fast rule-based fallback.
         val intent: Intent = if (llm.isReady()) {
-            val llmIntent = llm.resolveIntent(userText, ctx)
-            if (llmIntent is Intent.Ambiguous) {
-                // Belt-and-suspenders: if the LLM hiccupped (bad JSON,
-                // network blip, OOM), try rules. If rules also fail, we
-                // surface the LLM's own clarify_question if it set one,
-                // otherwise the generic ambiguity reply.
-                val rule = parser.parse(userText)
-                if (rule !is Intent.Ambiguous) rule else llmIntent
-            } else llmIntent
+            val llmIntent = withTimeoutOrNull(LLM_TIMEOUT_MS) { llm.resolveIntent(userText, ctx) }
+            when {
+                llmIntent == null -> {
+                    // Timed out — degrade to rules so the user gets *some*
+                    // answer instead of staring at "thinking..." forever.
+                    android.util.Log.w("ReminderEngine", "LLM timeout — falling back to rule parser")
+                    parser.parse(userText)
+                }
+                llmIntent is Intent.Ambiguous -> {
+                    val rule = parser.parse(userText)
+                    if (rule !is Intent.Ambiguous) rule else llmIntent
+                }
+                else -> llmIntent
+            }
         } else {
             parser.parse(userText)
         }
@@ -591,6 +602,11 @@ class ReminderEngine(
         // Anything shorter feels too risky to fuzzy-match — "do" matching
         // "doctor" would let users accidentally cancel unrelated reminders.
         const val MIN_QUERY_LEN = 3
+
+        // Bounded wait for LLM intent extraction. Generous for real hardware
+        // (a Pixel 8 Pro is ~2s) but firm enough to keep the UI responsive
+        // when the emulator or a stuck model would otherwise hang.
+        const val LLM_TIMEOUT_MS = 25_000L
     }
 }
 
