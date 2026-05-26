@@ -3,6 +3,7 @@
     <string name="app_name">Intelligent Reminder</string>
     <string name="tab_chat">Chat</string>
     <string name="tab_reminders">Reminders</string>
+    <string name="tab_models">Models</string>
     <string name="chat_input_hint">Tell me what to remind you about…</string>
     <string name="chat_send">Send</string>
     <string name="empty_reminders_title">No reminders yet</string>

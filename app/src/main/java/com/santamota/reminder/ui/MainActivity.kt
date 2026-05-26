@@ -7,8 +7,9 @@ import androidx.activity.enableEdgeToEdge
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.padding
 import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.automirrored.filled.Chat
 import androidx.compose.material.icons.filled.AccessTime
-import androidx.compose.material.icons.filled.Chat
+import androidx.compose.material.icons.filled.Memory
 import androidx.compose.material3.Icon
 import androidx.compose.material3.NavigationBar
 import androidx.compose.material3.NavigationBarItem
@@ -23,6 +24,7 @@ import androidx.compose.runtime.setValue
 import androidx.compose.ui.Modifier
 import com.santamota.reminder.R
 import com.santamota.reminder.ui.chat.ChatScreen
+import com.santamota.reminder.ui.models.ModelsScreen
 import com.santamota.reminder.ui.reminders.RemindersScreen
 import com.santamota.reminder.ui.theme.IntelligentReminderTheme
 import dagger.hilt.android.AndroidEntryPoint
@@ -43,8 +45,9 @@ class MainActivity : ComponentActivity() {
 }
 
 private enum class Tab(val title: Int, val icon: androidx.compose.ui.graphics.vector.ImageVector) {
-    Chat(R.string.tab_chat, Icons.Default.Chat),
+    Chat(R.string.tab_chat, Icons.AutoMirrored.Filled.Chat),
     Reminders(R.string.tab_reminders, Icons.Default.AccessTime),
+    Models(R.string.tab_models, Icons.Default.Memory),
 }
 
 @Composable
@@ -68,6 +71,7 @@ fun AppRoot() {
         when (tab) {
             Tab.Chat -> ChatScreen(modifier = Modifier.padding(padding))
             Tab.Reminders -> RemindersScreen(modifier = Modifier.padding(padding))
+            Tab.Models -> ModelsScreen(modifier = Modifier.padding(padding))
         }
     }
 }

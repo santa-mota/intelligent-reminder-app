@@ -99,9 +99,23 @@ class ReminderEngine(
             pending = null
         }
 
-        val intent = when (val rule = parser.parse(userText)) {
-            is Intent.Ambiguous -> if (llm.isReady()) llm.resolveIntent(userText, ctx) else rule
-            else -> rule
+        // LLM-first: when the model is loaded, the LLM is the primary parser.
+        // The rule parser only runs as a degraded fallback when the model
+        // isn't available (file missing, load failed, etc.). This trades
+        // ~500ms of inference latency for handling phrasings no regex
+        // can — and lets the model extract rich context into description.
+        val intent: Intent = if (llm.isReady()) {
+            val llmIntent = llm.resolveIntent(userText, ctx)
+            if (llmIntent is Intent.Ambiguous) {
+                // Belt-and-suspenders: if the LLM hiccupped (bad JSON,
+                // network blip, OOM), try rules. If rules also fail, we
+                // surface the LLM's own clarify_question if it set one,
+                // otherwise the generic ambiguity reply.
+                val rule = parser.parse(userText)
+                if (rule !is Intent.Ambiguous) rule else llmIntent
+            } else llmIntent
+        } else {
+            parser.parse(userText)
         }
 
         val reply = dispatch(intent, ctx)
@@ -199,7 +213,9 @@ class ReminderEngine(
             ),
         )
         is Intent.Ambiguous -> EngineReply(
-            text = "I didn't quite catch that. Could you rephrase? (e.g. \"remind me at 5pm to take vitamins\")",
+            text = intent.clarifyQuestion
+                ?: "I didn't quite catch that. Could you rephrase? (e.g. \"remind me at 5pm to take vitamins\")",
+            needsClarification = intent.clarifyQuestion != null,
         )
     }
 
@@ -235,7 +251,7 @@ class ReminderEngine(
 
         val main = Reminder(
             title = intent.title,
-            description = null,
+            description = intent.description,
             type = intent.type,
             triggerAt = triggerAt,
             recurrence = intent.recurrence ?: parent?.recurrence,

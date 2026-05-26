@@ -22,6 +22,7 @@ sealed interface Intent {
         val relativeTo: RelativeAnchor? = null,
         val leadUps: List<Duration> = emptyList(),
         val category: ReminderCategory = ReminderCategory.UNCATEGORIZED,
+        val description: String? = null,
     ) : Intent
 
     data class Move(
@@ -52,7 +53,16 @@ sealed interface Intent {
      */
     data class Chat(val text: String) : Intent
 
-    data class Ambiguous(val rawText: String, val reason: String) : Intent
+    /**
+     * The LLM (or rule parser) couldn't decide. If [clarifyQuestion] is set,
+     * surface it directly to the user — the LLM has already drafted the
+     * follow-up. Otherwise the engine shows a generic "could you rephrase" fallback.
+     */
+    data class Ambiguous(
+        val rawText: String,
+        val reason: String,
+        val clarifyQuestion: String? = null,
+    ) : Intent
 }
 
 enum class CancelScope { THIS_OCCURRENCE, ALL_OCCURRENCES, ENTIRE_GROUP }

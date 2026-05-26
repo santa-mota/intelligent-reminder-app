@@ -12,6 +12,8 @@ import com.santamota.reminder.data.alarm.AndroidAlarmScheduler
 import com.santamota.reminder.data.db.AppDatabase
 import com.santamota.reminder.data.db.ChatDao
 import com.santamota.reminder.data.db.ReminderDao
+import com.santamota.reminder.data.models.ModelDownloader
+import com.santamota.reminder.data.models.ModelsRepository
 import com.santamota.reminder.engine.PreferenceLearner
 import com.santamota.reminder.engine.PreferenceProfile
 import com.santamota.reminder.engine.ReminderEngine
@@ -52,8 +54,24 @@ object AppModule {
         AndroidAlarmScheduler(ctx)
 
     @Provides @Singleton
-    fun llm(@ApplicationContext ctx: Context): LlmAdapter =
-        MediaPipeGemmaAdapter(ctx)
+    fun modelsRepository(
+        @ApplicationContext ctx: Context,
+    ): ModelsRepository = ModelsRepository(ctx, ctx.appDataStore)
+
+    @Provides @Singleton
+    fun modelDownloader(repo: ModelsRepository): ModelDownloader = ModelDownloader(repo)
+
+    @Provides @Singleton
+    fun mediaPipeAdapter(
+        @ApplicationContext ctx: Context,
+        repo: ModelsRepository,
+    ): MediaPipeGemmaAdapter = MediaPipeGemmaAdapter(
+        appContext = ctx,
+        resolveModelPath = { repo.activeModelPathBlocking() },
+    )
+
+    @Provides @Singleton
+    fun llm(adapter: MediaPipeGemmaAdapter): LlmAdapter = adapter
 
     @Provides @Singleton
     fun parser(clock: Clock): RuleBasedParser = RuleBasedParser(clock)

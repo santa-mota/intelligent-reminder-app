@@ -7,6 +7,9 @@
     <uses-permission android:name="android.permission.RECEIVE_BOOT_COMPLETED" />
     <uses-permission android:name="android.permission.VIBRATE" />
     <uses-permission android:name="android.permission.WAKE_LOCK" />
+    <!-- INTERNET is used only by ModelDownloader to fetch on-device LLM
+         .task files from HuggingFace. Inference runs fully offline. -->
+    <uses-permission android:name="android.permission.INTERNET" />
 
     <application
         android:name=".ReminderApp"

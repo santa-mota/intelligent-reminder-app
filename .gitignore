@@ -24,11 +24,16 @@ captures/
 # Local config
 keystore.properties
 
-# Model files (downloaded at runtime, ~530MB — never check in)
+# Model files (downloaded at runtime, ~530MB — never check in).
+# Only the runtime files extensions are blocked; Kotlin source dirs named
+# "models/" (e.g. data/models/, ui/models/) are NOT ignored.
 **/*.task
 **/*.tflite
 **/*.bin
-**/models/
+# This used to be `**/models/` which incorrectly ignored my source dirs.
+# Pin to filesDir-style paths instead.
+/app/build/intermediates/**/models/
+**/app/src/main/assets/models/
 
 # Logs
 *.log
