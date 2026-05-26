@@ -128,17 +128,27 @@ class RuleBasedParser(
     private fun parseCreate(text: String, rawInput: String): Intent.Create? {
         val isAlarm = text.startsWith("alarm") ||
             text.startsWith("wake me") ||
-            Regex("""\bset\s+(?:an?\s+)?alarm\b""").containsMatchIn(text)
+            Regex("""\bset\s+(?:an?\s+)?(?:daily|weekly|monthly\s+)?alarm\b""").containsMatchIn(text)
 
-        val stripped = text
-            .replace(Regex("""^(?:remind\s+me(?:\s+to|\s+about)?|alarm\s+for|alarm\s+at|set\s+(?:an?\s+)?alarm\s+(?:for|at)|wake\s+me(?:\s+up)?\s*(?:at)?|notify\s+me(?:\s+to)?|tell\s+me\s+to)\s+"""), "")
+        // Extract recurrence FIRST so the verb-strip below doesn't eat
+        // "daily" / "weekly" / "monthly" before we record it. "set a daily
+        // alarm for lunch" should still be DAILY.
+        val (recurrence, deRec) = stripRecurrence(text)
+
+        // Verb-strip handles common natural phrasings: "remind me", "set an
+        // alarm", "can you set a daily alarm" (after recurrence already
+        // extracted), "could you remind me", "please notify me", etc.
+        val stripped = deRec
+            .replace(Regex("""^(?:please\s+|could\s+you\s+|can\s+you\s+|would\s+you\s+|i\s+(?:want|need|would\s+like)\s+(?:you\s+)?to\s+)+"""), "")
+            .replace(Regex("""^(?:remind\s+me(?:\s+to|\s+about)?|alarm\s+for|alarm\s+at|set\s+(?:an?\s+|a\s+)?(?:alarm|reminder)(?:\s+(?:for|at|to))?|wake\s+me(?:\s+up)?\s*(?:at)?|notify\s+me(?:\s+to)?|tell\s+me\s+to|ping\s+me(?:\s+to|\s+about)?)\s+"""), "")
+            .replace(Regex("""\?\s*$"""), "")  // trailing "?"
             .trim()
 
-        if (stripped == text && !text.startsWith("at ") && !text.startsWith("in ") &&
+        if (stripped == deRec && !text.startsWith("at ") && !text.startsWith("in ") &&
             !text.startsWith("every ") && !text.startsWith("daily ")
         ) return null
 
-        val (recurrence, withoutRec) = stripRecurrence(stripped)
+        val withoutRec = stripped
 
         // Relative anchor takes precedence — extraction also yields a title.
         parseRelativeAnchorAndTitle(withoutRec)?.let { (anchor, title) ->

@@ -77,6 +77,11 @@ class ModelDownloader(
                 tmpFile.delete()
             }
             repo.reportProgress(spec.id, DownloadState.Idle)
+            // Auto-activate if there's no currently-usable active model. This
+            // is the "I downloaded a model and it should just work" UX — the
+            // user shouldn't have to tap a second time to enable it after the
+            // download finishes.
+            repo.setActiveIfNone(spec.id)
             outFile
         }.onFailure { t ->
             tmpFile.delete()

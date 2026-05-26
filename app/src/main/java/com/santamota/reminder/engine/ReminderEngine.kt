@@ -223,11 +223,21 @@ class ReminderEngine(
                 ctx,
             ),
         )
-        is Intent.Ambiguous -> EngineReply(
-            text = intent.clarifyQuestion
-                ?: "I didn't quite catch that. Could you rephrase? (e.g. \"remind me at 5pm to take vitamins\")",
-            needsClarification = intent.clarifyQuestion != null,
-        )
+        is Intent.Ambiguous -> {
+            val llmAvailable = llm.isReady()
+            val text = intent.clarifyQuestion
+                ?: if (!llmAvailable) {
+                    // The rule parser is the only thing running — be honest
+                    // about why behavior feels dumb, and point at the fix.
+                    "I couldn't parse that on the simple path. Open the **Models** tab and pick an on-device LLM for smarter understanding."
+                } else {
+                    "I didn't quite catch that. Could you rephrase? (e.g. \"remind me at 5pm to take vitamins\")"
+                }
+            EngineReply(
+                text = text,
+                needsClarification = intent.clarifyQuestion != null,
+            )
+        }
     }
 
     private suspend fun handleCreate(intent: Intent.Create, ctx: ChatContext): EngineReply {
