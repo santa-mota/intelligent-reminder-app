@@ -69,11 +69,16 @@ class MediaPipeGemmaAdapter(
         return LlmIntentDecoder.decodeFromRaw(out, rawInput, json)
     }
 
+    /**
+     * Confirmation, error, "done" — these are short, deterministic strings
+     * derived from already-structured data. The LLM has no useful work to do
+     * here and tends to either echo the prompt verbatim or invent preamble
+     * ("You're asking for a clear, unambiguous action…"). Templates give a
+     * consistent, fast reply. The intent-extraction call is where the LLM
+     * earns its keep, not the response phrasing.
+     */
     override suspend fun composeResponse(prompt: ResponsePrompt, context: ChatContext): String =
-        generate(PromptTemplates.responsePrompt(prompt, context))
-            ?.cleanReply()
-            ?.takeIf { it.isNotBlank() }
-            ?: defaultResponse(prompt)
+        defaultResponse(prompt)
 
     private suspend fun generate(prompt: String): String? = withContext(Dispatchers.Default) {
         val eng = engine ?: if (tryInit()) engine else null
