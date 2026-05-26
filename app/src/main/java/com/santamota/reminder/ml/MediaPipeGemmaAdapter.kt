@@ -187,9 +187,16 @@ internal object LlmIntentDecoder {
         val title = obj["title"]?.str()?.trim()?.takeIf { it.isNotBlank() }
             ?: return Intent.Ambiguous(rawInput, "create without title")
         val description = obj["description"]?.str()?.trim()?.takeIf { it.isNotBlank() }
+        // Belt-and-suspenders: small models (Qwen 0.5B etc.) sometimes
+        // ignore the "alarm" cue and default to NOTIFICATION. If the user
+        // *said* alarm, that's what they get — promote here unconditionally.
+        // "remind me about alarm clocks" is an unlikely edge case; we accept
+        // a few false-positives over silently demoting the user's intent.
+        val saidAlarm = ALARM_HINT.containsMatchIn(rawInput)
         val type = obj["type"]?.str()?.let {
             runCatching { ReminderType.valueOf(it.uppercase()) }.getOrNull()
         } ?: ReminderType.NOTIFICATION
+        val effectiveType = if (saidAlarm) ReminderType.ALARM else type
         val category = obj["category"]?.str()?.let {
             runCatching { ReminderCategory.valueOf(it.uppercase()) }.getOrNull()
         } ?: ReminderCategory.UNCATEGORIZED
@@ -206,7 +213,7 @@ internal object LlmIntentDecoder {
         }
         return Intent.Create(
             title = title,
-            type = type,
+            type = effectiveType,
             timeSpec = timeSpec ?: TimeSpec.RelativeToNow(Duration.ZERO),
             recurrence = recurrence,
             relativeTo = relativeTo,
@@ -214,6 +221,9 @@ internal object LlmIntentDecoder {
             description = description,
         )
     }
+
+    /** Word-boundary "alarm" / "wake me" / "set an alarm" — used to force ALARM type. */
+    private val ALARM_HINT = Regex("""\b(alarm|wake\s+me)\b""", RegexOption.IGNORE_CASE)
 
     private fun decodeMove(obj: JsonObject, rawInput: String): Intent {
         val query = obj["match_query"]?.str() ?: return Intent.Ambiguous(rawInput, "move without target")

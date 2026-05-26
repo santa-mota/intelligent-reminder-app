@@ -532,7 +532,13 @@ class ReminderEngine(
         } else ""
         val leads = if (plan.leadUps.isEmpty()) "" else
             ", plus ${plan.leadUps.size} lead-up reminder(s)"
-        return "${main.title.replaceFirstChar { it.uppercase() }} — $when_$relative$leads."
+        // For ALARM-type reminders we hand off to the system Clock app via
+        // AlarmClock.ACTION_SET_ALARM. Telling the user where it lives makes
+        // it discoverable and explains why it's not in our Reminders tab.
+        val destination = if (main.type == com.santamota.reminder.domain.ReminderType.ALARM) {
+            " I've set this as a system alarm — check your phone's Clock app."
+        } else ""
+        return "${main.title.replaceFirstChar { it.uppercase() }} — $when_$relative$leads.$destination"
     }
 
     /**

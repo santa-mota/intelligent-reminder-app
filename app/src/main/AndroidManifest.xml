@@ -7,6 +7,11 @@
     <uses-permission android:name="android.permission.RECEIVE_BOOT_COMPLETED" />
     <uses-permission android:name="android.permission.VIBRATE" />
     <uses-permission android:name="android.permission.WAKE_LOCK" />
+    <!-- SET_ALARM lets us hand off ALARM-type reminders to the system Clock
+         app via AlarmClock.ACTION_SET_ALARM, so the user gets a real Android
+         alarm (lockscreen takeover, alarm sound, snooze) instead of just a
+         high-priority notification. Auto-granted normal permission. -->
+    <uses-permission android:name="com.android.alarm.permission.SET_ALARM" />
     <!-- INTERNET is used only by ModelDownloader to fetch on-device LLM
          .task files from HuggingFace. Inference runs fully offline. -->
     <uses-permission android:name="android.permission.INTERNET" />
