@@ -1,0 +1,38 @@
+# Build / IDE
+*.iml
+.gradle/
+local.properties
+.idea/
+.DS_Store
+build/
+captures/
+.externalNativeBuild/
+.cxx/
+
+# Generated
+**/generated/
+*.apk
+*.aab
+*.ap_
+*.dex
+*.class
+
+# Keystore
+*.jks
+*.keystore
+
+# Local config
+keystore.properties
+
+# Model files (downloaded at runtime, ~530MB — never check in)
+**/*.task
+**/*.tflite
+**/*.bin
+**/models/
+
+# Logs
+*.log
+hs_err_pid*
+
+# Kotlin
+.kotlin/

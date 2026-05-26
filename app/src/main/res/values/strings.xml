@@ -1,0 +1,18 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="app_name">Intelligent Reminder</string>
+    <string name="tab_chat">Chat</string>
+    <string name="tab_reminders">Reminders</string>
+    <string name="chat_input_hint">Tell me what to remind you about…</string>
+    <string name="chat_send">Send</string>
+    <string name="empty_reminders_title">No reminders yet</string>
+    <string name="empty_reminders_body">Tap Chat and tell me what to remind you about.</string>
+    <string name="section_daily">Daily</string>
+    <string name="section_weekly">Weekly</string>
+    <string name="section_monthly">Monthly</string>
+    <string name="section_once">One-time</string>
+    <string name="alarm_channel_name">Alarms</string>
+    <string name="alarm_channel_desc">Wake-up alarms and critical reminders</string>
+    <string name="notification_channel_name">Reminders</string>
+    <string name="notification_channel_desc">Lead-up reminders and nudges</string>
+</resources>
