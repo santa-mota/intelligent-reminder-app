@@ -56,17 +56,22 @@ breaking entirely.
 
 ## Model registry
 
-Four publicly-downloadable `.task` files for MediaPipe `LlmInference`. All
-HuggingFace mirrors (`litert-community/*`), all `gated: false` — they
-actually download without auth walls (unlike every Gemma variant, which is
-behind a license gate and so unusable in a sideloaded app).
+Two publicly-downloadable `.task` files for MediaPipe `LlmInference`. Both
+are HuggingFace mirrors (`litert-community/*`) and `gated: false` — no auth
+walls (unlike every Gemma variant, which is behind a license gate and so
+unusable in a sideloaded app).
 
 | Model | Params / Quant | Size | Role |
 |---|---|---|---|
-| SmolLM 135M Instruct | 135M / q8 | 159 MB | Fast tier — handles trivial intent only |
-| **Qwen 2.5 0.5B Instruct** | 0.5B / q8 | 521 MB | **Default**: snappy on Pixel-class, good JSON extraction |
-| TinyLlama 1.1B Chat | 1.1B / q8 | 1095 MB | Alternative voice; older base |
-| Qwen 2.5 1.5B Instruct | 1.5B / q8 | 1523 MB | Highest quality under 2 GB; slower prefill |
+| **Qwen 2.5 0.5B Instruct** | 0.5B / q8 | 521 MB | **Default.** Fast on Pixel-class, follows the JSON schema reliably. |
+| Qwen 2.5 1.5B Instruct | 1.5B / q8 | 1523 MB | Higher quality on edge cases. ~3× the prefill time on phone. |
+
+Earlier versions of the picker also listed **SmolLM 135M** and
+**TinyLlama 1.1B**. Both were removed after real-device testing — SmolLM
+produced invalid UTF-8 tokens instead of JSON (logged by MediaPipe as
+`LlmResponseContext.responses contains invalid UTF-8 data`), and TinyLlama
+was inconsistent on structured output. Listing models that can't reliably
+do the job confused users, who reasonably assumed the app was broken.
 
 INTERNET permission is only used to download these files. **Inference
 itself never touches the network.**
