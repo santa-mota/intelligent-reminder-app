@@ -284,6 +284,19 @@ class ReminderEngine(
             updatedAt = now,
         )
 
+        // Dedup: if an active reminder already matches this title + type +
+        // recurrence + time-of-day, don't create a second one. The user
+        // sometimes resends the same query (e.g., didn't see the reply land,
+        // or was retrying after a confusing message); shouldn't end up with
+        // three "lunch every day at 2pm" rows.
+        findExistingMatch(main)?.let { existing ->
+            val summary = describePlan(ReminderPlan(main = existing, rationale = "existing"))
+            return EngineReply(
+                text = "You already have this — $summary",
+                plan = null,
+            )
+        }
+
         // Plan lead-ups (the "every 3 hours starting day before" behaviour).
         val plan = ReminderPlan(
             main = main,
@@ -490,6 +503,42 @@ class ReminderEngine(
 
     private suspend fun activeReminders(): List<Reminder> =
         reminderDao.activeOnce().map { it.toDomain() }
+
+    /**
+     * Returns an existing active reminder that "matches" the given one,
+     * for dedup purposes. Matching rules:
+     *   - Title equals (case-insensitive, trimmed)
+     *   - Same [ReminderType]
+     *   - Same recurrence pattern (both null, or both same pattern + days)
+     *   - Same time-of-day for recurring; same full instant for one-time
+     *
+     * Returning the *existing* row (not just a bool) lets the caller echo
+     * the user-friendly description in their reply.
+     */
+    private suspend fun findExistingMatch(candidate: Reminder): Reminder? {
+        val cTitle = candidate.title.trim().lowercase()
+        val cTime = candidate.triggerAt.toLocalTime()
+        return activeReminders().firstOrNull { existing ->
+            if (existing.title.trim().lowercase() != cTitle) return@firstOrNull false
+            if (existing.type != candidate.type) return@firstOrNull false
+            val recMatch = when {
+                existing.recurrence == null && candidate.recurrence == null -> true
+                existing.recurrence == null || candidate.recurrence == null -> false
+                existing.recurrence!!.pattern != candidate.recurrence!!.pattern -> false
+                existing.recurrence!!.daysOfWeek != candidate.recurrence!!.daysOfWeek -> false
+                else -> true
+            }
+            if (!recMatch) return@firstOrNull false
+            // Recurring → compare time-of-day only (different start dates of
+            // the same daily schedule are the same schedule). One-time →
+            // require the exact instant.
+            if (candidate.recurrence != null) {
+                existing.triggerAt.toLocalTime() == cTime
+            } else {
+                existing.triggerAt.toInstant() == candidate.triggerAt.toInstant()
+            }
+        }
+    }
 
     private suspend fun persist(reminders: List<Reminder>) {
         reminderDao.replaceCluster(reminders.map { it.toEntity() })
